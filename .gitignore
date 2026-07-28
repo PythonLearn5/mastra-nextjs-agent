@@ -39,12 +39,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-/.idea/inspectionProfiles/Project_Default.xml
-/.idea/libraries/test_package.xml
-/.idea/libraries/ts_commonjs_default_export.xml
-/.idea/.gitignore
-/.idea/misc.xml
-/.idea/modules.xml
-/.idea/my-nextjs-agent.iml
-/.idea/vcs.xml
-/.idea/mastra-nextjs-agent.iml
+/.idea
+/yarn.lock
