@@ -1,5 +1,5 @@
 import { handleChatStream } from '@mastra/ai-sdk'
-import { toAISdkV5Messages } from '@mastra/ai-sdk/ui'
+import { toAISdkMessages } from '@mastra/ai-sdk/ui'
 import { createUIMessageStreamResponse } from 'ai'
 import { mastra } from '@/mastra'
 import { NextResponse } from 'next/server'
@@ -12,6 +12,7 @@ export async function POST(req: Request) {
     const stream = await handleChatStream({
         mastra,
         agentId: 'weather-agent',
+        version: 'v6',
         params: {
             ...params,
             memory: {
@@ -37,7 +38,7 @@ export async function GET() {
         console.log('No previous messages found.')
     }
 
-    const uiMessages = toAISdkV5Messages(response?.messages || [])
+    const uiMessages = toAISdkMessages(response?.messages || [], { version: 'v6' })
 
     return NextResponse.json(uiMessages)
 }
