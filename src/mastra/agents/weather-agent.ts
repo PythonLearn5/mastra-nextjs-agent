@@ -1,6 +1,14 @@
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
+import { LibSQLStore } from '@mastra/libsql';
 import { weatherTool } from '../tools/weather-tool';
+const memory = new Memory({
+  storage: new LibSQLStore({
+    id: 'weather-agent-memory',
+    url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  }),
+});
 
 export const weatherAgent = new Agent({
   id: 'weather-agent',
@@ -19,5 +27,5 @@ Your primary function is to help users get weather details for specific location
 Use the weatherTool to fetch current weather data.`,
   model: 'zhipuai/glm-5.2',
   tools: { weatherTool },
-  memory: new Memory(),
+  memory,
 });

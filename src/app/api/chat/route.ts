@@ -4,41 +4,67 @@ import { createUIMessageStreamResponse } from 'ai'
 import { mastra } from '@/mastra'
 import { NextResponse } from 'next/server'
 
-const THREAD_ID = 'example-user-id'
 const RESOURCE_ID = 'weather-chat'
 
-export async function POST(req: Request) {
-    const params = await req.json()
-    const stream = await handleChatStream({
-        mastra,
-        agentId: 'weather-agent',
-        version: 'v6',
-        params: {
-            ...params,
-            memory: {
-                ...params.memory,
-                thread: THREAD_ID,
-                resource: RESOURCE_ID,
-            },
-        },
-    })
-    return createUIMessageStreamResponse({ stream })
+export async function GET(req: Request) {
+    try {
+        const memory = await mastra.getAgentById('weather-agent').getMemory()
+
+        const { searchParams } = new URL(req.url)
+        const threadId = searchParams.get('threadId') ?? ''
+
+        let response = null
+        if (memory && threadId) {
+            try {
+                response = await memory.recall({
+                    threadId,
+                    resourceId: RESOURCE_ID,
+                })
+            } catch {
+                console.log('No previous messages found.')
+            }
+        }
+
+        const uiMessages = toAISdkMessages(response?.messages || [], {
+            version: 'v6',
+        })
+
+        return NextResponse.json(uiMessages)
+    } catch (err) {
+        console.error('[GET /api/chat] error:', err)
+        return NextResponse.json(
+            { error: err instanceof Error ? err.message : String(err) },
+            { status: 500 }
+        )
+    }
 }
 
-export async function GET() {
-    const memory = await mastra.getAgentById('weather-agent').getMemory()
-    let response = null
-
+export async function POST(req: Request) {
     try {
-        response = await memory?.recall({
-            threadId: THREAD_ID,
-            resourceId: RESOURCE_ID,
+        const params = await req.json()
+        const threadId = params?.threadId ?? params?.memory?.thread ?? ''
+        const model = params?.model as string | undefined
+
+        const stream = await handleChatStream({
+            mastra,
+            agentId: 'weather-agent',
+            version: 'v6',
+            params: {
+                ...params,
+                ...(model ? { model } : {}),
+                memory: {
+                    ...params?.memory,
+                    thread: threadId,
+                    resource: RESOURCE_ID,
+                },
+            },
         })
-    } catch {
-        console.log('No previous messages found.')
+        return createUIMessageStreamResponse({ stream })
+    } catch (err) {
+        console.error('[POST /api/chat] error:', err)
+        return NextResponse.json(
+            { error: err instanceof Error ? err.message : String(err) },
+            { status: 500 }
+        )
     }
-
-    const uiMessages = toAISdkMessages(response?.messages || [], { version: 'v6' })
-
-    return NextResponse.json(uiMessages)
 }
