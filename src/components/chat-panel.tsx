@@ -212,7 +212,7 @@ export function ChatPanel({ threadId, model, onTitleUpdate }: ChatPanelProps) {
                                 >
                                     <div className="mx-auto flex w-full max-w-3xl gap-4 px-4 py-6">
                                         <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-xs font-semibold text-background">
-                                            GPT
+                                            AI
                                         </div>
                                         <div className="min-w-0 flex-1 space-y-4">
                                             {message.parts?.map((part, i) => {
@@ -282,7 +282,7 @@ export function ChatPanel({ threadId, model, onTitleUpdate }: ChatPanelProps) {
                             <PromptInputTextarea
                                 onChange={e => setInput(e.target.value)}
                                 value={input}
-                                placeholder="有问题，尽管问"
+                                placeholder="关于机床，尽管问…"
                                 className="py-3 text-[15px] leading-6"
                                 disabled={status !== 'ready'}
                             />

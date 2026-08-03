@@ -45,7 +45,7 @@ export function TopBar({
             </Button>
 
             <div className="min-w-0 flex-1 truncate text-sm font-medium">
-                {title || 'ChatGPT'}
+                {title || '机床智能助手'}
             </div>
 
             <div className="flex items-center gap-2">
