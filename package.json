@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "build-kb": "npx tsx scripts/build-knowledge-base.ts"
+    "build-kb": "npx tsx scripts/build-knowledge-base.ts",
+    "debug-kb": "npx tsx scripts/debug-vector-search.ts"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.41",

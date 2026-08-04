@@ -1,5 +1,6 @@
 import 'dotenv/config'
-import { resolve } from 'path'
+import { resolve, join } from 'path'
+import { readdirSync, unlinkSync, existsSync, statSync } from 'fs'
 import { MDocument } from '@mastra/rag'
 import { LibSQLVector } from '@mastra/libsql'
 import { embedMany, generateText } from 'ai'
@@ -13,6 +14,17 @@ import {
 
 const INDEX_NAME = 'machine_tool_knowledge'
 const EMBEDDING_DIMENSIONS = 2048
+
+function clearDirectory(dirPath: string) {
+  if (!existsSync(dirPath)) return
+  for (const entry of readdirSync(dirPath)) {
+    const fullPath = join(dirPath, entry)
+    const stat = statSync(fullPath)
+    if (stat.isFile()) {
+      unlinkSync(fullPath)
+    }
+  }
+}
 
 const embedder = new ModelRouterEmbeddingModel({
   id: 'zhipuai/embedding-3',
@@ -72,6 +84,12 @@ async function describeImage(
 
 async function main() {
   const kbDir = resolve(process.cwd(), 'knowledge-base')
+  const imagesDir = resolve(process.cwd(), 'public', 'knowledge-images')
+
+  console.log(`\n🧹 清理旧数据…`)
+  clearDirectory(imagesDir)
+  console.log(`   已清理图片目录: ${imagesDir}`)
+
   console.log(`\n📁 知识库目录: ${kbDir}`)
   console.log(`📋 支持的格式: ${getSupportedExtensions().join(', ')}\n`)
 
@@ -94,6 +112,8 @@ async function main() {
 
   console.log('\n2️⃣  识别图片内容…')
   const imageDescriptions: { text: string; imageUrl: string; sourceFile: string }[] = []
+  const imagePathMap: Map<string, string> = new Map()
+
   if (totalImages > 0) {
     let imgIdx = 0
     for (const doc of documents) {
@@ -101,6 +121,15 @@ async function main() {
       for (let i = 0; i < doc.images.length; i++) {
         imgIdx++
         const img = doc.images[i]
+
+        if (!img.dataUrl) {
+          const placeholderUrl = `/knowledge-images/placeholder_${imgIdx}.txt`
+          imagePathMap.set(img.name, placeholderUrl)
+          imagePathMap.set(`images/${img.name}`, placeholderUrl)
+          console.log(`   跳过 ${imgIdx}/${totalImages}: ${img.sourceFile} (无 data URL, 原始路径: ${img.name})`)
+          continue
+        }
+
         console.log(`   识别 ${imgIdx}/${totalImages}: ${img.sourceFile} p${img.pageNumber}…`)
         const result = await describeImage(img, i)
         if (result) {
@@ -109,12 +138,28 @@ async function main() {
             imageUrl: result.imageUrl,
             sourceFile: img.sourceFile,
           })
+          const origName = img.name || `${img.sourceFile.replace(/\.[^.]+$/, '')}_img${i + 1}`
+          imagePathMap.set(origName, result.imageUrl)
+          imagePathMap.set(`images/${origName}`, result.imageUrl)
           console.log(`   → 已保存: ${result.imageUrl} (${result.description.length} 字符)`)
         }
       }
     }
   } else {
     console.log('   无图片需要识别')
+  }
+
+  for (const doc of documents) {
+    let modified = false
+    for (const [origName, url] of imagePathMap) {
+      if (doc.text.includes(origName)) {
+        doc.text = doc.text.split(origName).join(url)
+        modified = true
+      }
+    }
+    if (modified) {
+      console.log(`   替换图片路径: ${doc.metadata.fileName}`)
+    }
   }
 
   console.log('\n3️⃣  分块（文本 + 图片描述）…')
@@ -199,7 +244,10 @@ async function main() {
   await vectorStore.upsert({
     indexName: INDEX_NAME,
     vectors: allEmbeddings,
-    metadata: allChunks.map(c => c.metadata),
+    metadata: allChunks.map(c => ({
+      ...c.metadata,
+      text: c.text,
+    })),
   })
 
   console.log(`\n✅ 知识库构建完成！`)

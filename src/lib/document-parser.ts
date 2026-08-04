@@ -33,20 +33,37 @@ export function registerParser(extension: string, fn: ParserFn) {
 }
 
 async function parsePdf(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
+  const fileBase = basename(filePath)
+  const mineruUrl = process.env.MINERU_API_URL
+
+  if (mineruUrl) {
+    console.log(`  ${fileBase}: 使用 MinerU 解析…`)
+    try {
+      const { parseWithMinerU } = await import('./mineru-client')
+      const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
+      const images: ExtractedImage[] = result.images.map((img, i) => ({
+        dataUrl: img.dataUrl,
+        name: img.name,
+        width: 0,
+        height: 0,
+        sourceFile: fileBase,
+        pageNumber: i + 1,
+      }))
+      console.log(`  ${fileBase}: MinerU 完成，${result.mdContent.length} 字符，${images.length} 张图片`)
+      return { text: result.mdContent, images }
+    } catch (err) {
+      console.warn(`  ${fileBase}: MinerU 失败（${err instanceof Error ? err.message : err}），回退到 pdf-parse…`)
+    }
+  }
+
   const { PDFParse } = await import('pdf-parse')
   const buffer = readFileSync(filePath)
   const pdf = new PDFParse({ data: new Uint8Array(buffer) })
-
   const textResult = await pdf.getText()
 
   const images: ExtractedImage[] = []
-  const fileBase = basename(filePath)
-
   try {
-    const imageResult = await pdf.getImage({
-      imageDataUrl: true,
-      imageThreshold: 100,
-    })
+    const imageResult = await pdf.getImage({ imageDataUrl: true, imageThreshold: 100 })
     for (const page of imageResult.pages) {
       for (const img of page.images) {
         if (img.dataUrl && img.width >= 100 && img.height >= 100) {
@@ -65,10 +82,7 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
   } catch (err) {
     console.warn(`  ${fileBase}: 嵌入图片提取失败（${err instanceof Error ? err.message : err}），尝试整页截图…`)
     try {
-      const screenshotResult = await pdf.getScreenshot({
-        imageDataUrl: true,
-        desiredWidth: 1024,
-      })
+      const screenshotResult = await pdf.getScreenshot({ imageDataUrl: true, desiredWidth: 1024 })
       for (const page of screenshotResult.pages) {
         if (page.dataUrl && page.width >= 100 && page.height >= 100) {
           images.push({
@@ -92,9 +106,73 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
 }
 
 async function parseWord(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
+  const fileBase = basename(filePath)
+  const mineruUrl = process.env.MINERU_API_URL
+
+  if (mineruUrl) {
+    console.log(`  ${fileBase}: 使用 MinerU 解析…`)
+    try {
+      const { parseWithMinerU } = await import('./mineru-client')
+      const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
+      const images: ExtractedImage[] = result.images.map((img, i) => ({
+        dataUrl: img.dataUrl,
+        name: img.name,
+        width: 0,
+        height: 0,
+        sourceFile: fileBase,
+        pageNumber: i + 1,
+      }))
+      console.log(`  ${fileBase}: MinerU 完成，${result.mdContent.length} 字符，${images.length} 张图片`)
+      return { text: result.mdContent, images }
+    } catch (err) {
+      console.warn(`  ${fileBase}: MinerU 失败（${err instanceof Error ? err.message : err}），回退到 mammoth…`)
+    }
+  }
+
   const mammoth = await import('mammoth')
-  const result = await mammoth.extractRawText({ path: filePath })
-  return { text: result.value }
+  const buffer = readFileSync(filePath)
+
+  const images: ExtractedImage[] = []
+  let imgIdx = 0
+
+  const htmlResult = await mammoth.convertToHtml(
+    { buffer },
+    {
+      convertImage: mammoth.images.imgElement(async (image) => {
+        const buf = await image.read()
+        const base64 = buf.toString('base64')
+        const ext = image.contentType === 'image/jpeg' ? 'jpg' : 'png'
+        const dataUrl = `data:image/${ext};base64,${base64}`
+        imgIdx++
+        const imgName = `${fileBase.replace(/\.[^.]+$/, '')}_img${imgIdx}`
+        images.push({
+          dataUrl,
+          name: imgName,
+          width: 0,
+          height: 0,
+          sourceFile: fileBase,
+          pageNumber: imgIdx,
+        })
+        return { src: dataUrl }
+      }),
+    }
+  )
+
+  const text = htmlResult.value
+    .replace(/<img[^>]*>/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  console.log(`  ${fileBase}: 提取到 ${images.length} 张嵌入图片`)
+
+  return { text, images }
 }
 
 async function parseText(filePath: string): Promise<{ text: string; images?: undefined }> {
@@ -174,6 +252,10 @@ export async function parseDirectory(dirPath: string): Promise<ParsedDocument[]>
   const entries = readdirSync(dirPath)
 
   for (const entry of entries) {
+    if (entry.startsWith('~$') || entry.startsWith('~') || entry.startsWith('.')) {
+      continue
+    }
+
     const fullPath = join(dirPath, entry)
     const stat = statSync(fullPath)
 
