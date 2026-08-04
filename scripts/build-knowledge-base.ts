@@ -2,16 +2,26 @@ import 'dotenv/config'
 import { resolve } from 'path'
 import { MDocument } from '@mastra/rag'
 import { LibSQLVector } from '@mastra/libsql'
-import { embedMany } from 'ai'
-import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
-import { parseDirectory, getSupportedExtensions } from '../src/lib/document-parser'
+import { embedMany, generateText } from 'ai'
+import { ModelRouterEmbeddingModel, ModelRouterLanguageModel } from '@mastra/core/llm'
+import {
+  parseDirectory,
+  getSupportedExtensions,
+  saveImageToPublic,
+  type ExtractedImage,
+} from '../src/lib/document-parser'
 
 const INDEX_NAME = 'machine_tool_knowledge'
-
 const EMBEDDING_DIMENSIONS = 2048
 
 const embedder = new ModelRouterEmbeddingModel({
   id: 'zhipuai/embedding-3',
+  url: 'https://open.bigmodel.cn/api/paas/v4',
+  apiKey: process.env.ZHIPU_API_KEY!,
+})
+
+const visionModel = new ModelRouterLanguageModel({
+  id: 'zhipuai/glm-4.5v',
   url: 'https://open.bigmodel.cn/api/paas/v4',
   apiKey: process.env.ZHIPU_API_KEY!,
 })
@@ -21,6 +31,44 @@ const vectorStore = new LibSQLVector({
   url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
   authToken: process.env.TURSO_AUTH_TOKEN,
 })
+
+async function describeImage(
+  image: ExtractedImage,
+  index: number
+): Promise<{ description: string; imageUrl: string } | null> {
+  try {
+    const safeName = `${image.sourceFile.replace(/\.[^.]+$/, '')}_p${image.pageNumber}_${index}`
+    const imageUrl = saveImageToPublic(image.dataUrl, safeName)
+    console.log(`     已保存图片: ${imageUrl}`)
+
+    const dataUrlSize = Math.round(image.dataUrl.length * 0.75 / 1024)
+    console.log(`     图片大小: ~${dataUrlSize}KB，调用视觉模型…`)
+
+    const result = await generateText({
+      model: visionModel as any,
+      maxOutputTokens: 1000,
+      abortSignal: AbortSignal.timeout(60000),
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', image: image.dataUrl },
+            {
+              type: 'text',
+              text: '请用中文简要描述这张图片的内容，重点说明其中的技术信息（文字、数据、图表）。不超过300字。',
+            },
+          ],
+        },
+      ],
+    })
+
+    return { description: result.text, imageUrl }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`     图片识别失败: ${msg}`)
+    return null
+  }
+}
 
 async function main() {
   const kbDir = resolve(process.cwd(), 'knowledge-base')
@@ -33,13 +81,45 @@ async function main() {
     console.error('❌ 未找到任何可解析的文档。请将 PDF/Word/TXT 等文件放入 knowledge-base/ 目录。')
     process.exit(1)
   }
-  console.log(`   解析到 ${documents.length} 个文件`)
+
+  let totalImages = 0
   for (const doc of documents) {
-    console.log(`   • ${doc.metadata.fileName} (${doc.metadata.extension}) — ${doc.text.length} 字符`)
+    const imgCount = doc.images?.length ?? 0
+    totalImages += imgCount
+    console.log(
+      `   • ${doc.metadata.fileName} (${doc.metadata.extension}) — ${doc.text.length} 字符${imgCount > 0 ? `, ${imgCount} 张图片` : ''}`
+    )
+  }
+  console.log(`   共 ${documents.length} 个文件, ${totalImages} 张图片`)
+
+  console.log('\n2️⃣  识别图片内容…')
+  const imageDescriptions: { text: string; imageUrl: string; sourceFile: string }[] = []
+  if (totalImages > 0) {
+    let imgIdx = 0
+    for (const doc of documents) {
+      if (!doc.images || doc.images.length === 0) continue
+      for (let i = 0; i < doc.images.length; i++) {
+        imgIdx++
+        const img = doc.images[i]
+        console.log(`   识别 ${imgIdx}/${totalImages}: ${img.sourceFile} p${img.pageNumber}…`)
+        const result = await describeImage(img, i)
+        if (result) {
+          imageDescriptions.push({
+            text: result.description,
+            imageUrl: result.imageUrl,
+            sourceFile: img.sourceFile,
+          })
+          console.log(`   → 已保存: ${result.imageUrl} (${result.description.length} 字符)`)
+        }
+      }
+    }
+  } else {
+    console.log('   无图片需要识别')
   }
 
-  console.log('\n2️⃣  分块…')
+  console.log('\n3️⃣  分块（文本 + 图片描述）…')
   const allChunks: { text: string; metadata: Record<string, unknown> }[] = []
+
   for (const doc of documents) {
     const md = MDocument.fromText(doc.text, doc.metadata)
     const chunks = await md.chunk({
@@ -58,9 +138,39 @@ async function main() {
     }
     console.log(`   ${doc.metadata.fileName} → ${chunks.length} 块`)
   }
+
+  for (const desc of imageDescriptions) {
+    const md = MDocument.fromText(desc.text, {
+      source: desc.sourceFile,
+      fileName: desc.sourceFile,
+      extension: '.image',
+      imageUrl: desc.imageUrl,
+      type: 'image-description',
+    })
+    const chunks = await md.chunk({
+      strategy: 'recursive',
+      maxSize: 512,
+      overlap: 50,
+    })
+    for (const chunk of chunks) {
+      allChunks.push({
+        text: chunk.text,
+        metadata: {
+          source: desc.sourceFile,
+          fileName: desc.sourceFile,
+          extension: '.image',
+          imageUrl: desc.imageUrl,
+          type: 'image-description',
+          ...chunk.metadata,
+        },
+      })
+    }
+    console.log(`   ${desc.sourceFile} 图片描述 → ${chunks.length} 块`)
+  }
+
   console.log(`   共 ${allChunks.length} 个文本块\n`)
 
-  console.log('3️⃣  向量化…')
+  console.log('4️⃣  向量化…')
   const batchSize = 50
   const allEmbeddings: number[][] = []
   for (let i = 0; i < allChunks.length; i += batchSize) {
@@ -73,7 +183,7 @@ async function main() {
     console.log(`   已处理 ${Math.min(i + batchSize, allChunks.length)}/${allChunks.length} 块`)
   }
 
-  console.log('\n4️⃣  写入向量库…')
+  console.log('\n5️⃣  写入向量库…')
   try {
     await vectorStore.deleteIndex({ indexName: INDEX_NAME })
     console.log(`   已清除旧索引: ${INDEX_NAME}`)
@@ -96,7 +206,12 @@ async function main() {
   console.log(`   索引名: ${INDEX_NAME}`)
   console.log(`   向量数: ${allEmbeddings.length}`)
   console.log(`   维度: ${EMBEDDING_DIMENSIONS}`)
-  console.log(`   来源文件: ${documents.length}\n`)
+  console.log(`   来源文件: ${documents.length}`)
+  console.log(`   图片描述: ${imageDescriptions.length}`)
+  if (imageDescriptions.length > 0) {
+    console.log(`   图片路径: /knowledge-images/`)
+  }
+  console.log('')
 }
 
 main().catch(err => {

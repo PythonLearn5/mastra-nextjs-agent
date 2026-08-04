@@ -1,5 +1,14 @@
-import { readFileSync, readdirSync, existsSync, statSync } from 'fs'
-import { join, extname, basename } from 'path'
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync } from 'fs'
+import { join, extname, basename, resolve } from 'path'
+
+export interface ExtractedImage {
+  dataUrl: string
+  name: string
+  width: number
+  height: number
+  sourceFile: string
+  pageNumber: number
+}
 
 export interface ParsedDocument {
   text: string
@@ -9,9 +18,10 @@ export interface ParsedDocument {
     extension: string
     [key: string]: unknown
   }
+  images?: ExtractedImage[]
 }
 
-type ParserFn = (filePath: string) => Promise<string>
+type ParserFn = (filePath: string) => Promise<{ text: string; images?: ExtractedImage[] }>
 
 const parsers: Record<string, ParserFn> = {}
 
@@ -22,28 +32,104 @@ export function registerParser(extension: string, fn: ParserFn) {
   parsers[ext] = fn
 }
 
-async function parsePdf(filePath: string): Promise<string> {
+async function parsePdf(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
   const { PDFParse } = await import('pdf-parse')
   const buffer = readFileSync(filePath)
   const pdf = new PDFParse({ data: new Uint8Array(buffer) })
-  const result = await pdf.getText()
+
+  const textResult = await pdf.getText()
+
+  const images: ExtractedImage[] = []
+  const fileBase = basename(filePath)
+
+  try {
+    const imageResult = await pdf.getImage({
+      imageDataUrl: true,
+      imageThreshold: 100,
+    })
+    for (const page of imageResult.pages) {
+      for (const img of page.images) {
+        if (img.dataUrl && img.width >= 100 && img.height >= 100) {
+          images.push({
+            dataUrl: img.dataUrl,
+            name: img.name || `image_p${page.pageNumber}`,
+            width: img.width,
+            height: img.height,
+            sourceFile: fileBase,
+            pageNumber: page.pageNumber,
+          })
+        }
+      }
+    }
+    console.log(`  ${fileBase}: 提取到 ${images.length} 张嵌入图片`)
+  } catch (err) {
+    console.warn(`  ${fileBase}: 嵌入图片提取失败（${err instanceof Error ? err.message : err}），尝试整页截图…`)
+    try {
+      const screenshotResult = await pdf.getScreenshot({
+        imageDataUrl: true,
+        desiredWidth: 1024,
+      })
+      for (const page of screenshotResult.pages) {
+        if (page.dataUrl && page.width >= 100 && page.height >= 100) {
+          images.push({
+            dataUrl: page.dataUrl,
+            name: `screenshot_p${page.pageNumber}`,
+            width: page.width,
+            height: page.height,
+            sourceFile: fileBase,
+            pageNumber: page.pageNumber,
+          })
+        }
+      }
+      console.log(`  ${fileBase}: 截图 ${images.length} 页作为图片`)
+    } catch (screenshotErr) {
+      console.warn(`  ${fileBase}: 整页截图也失败（${screenshotErr instanceof Error ? screenshotErr.message : screenshotErr}），跳过图片`)
+    }
+  }
+
   await pdf.destroy()
-  return result.text
+  return { text: textResult.text, images }
 }
 
-async function parseWord(filePath: string): Promise<string> {
+async function parseWord(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
   const mammoth = await import('mammoth')
   const result = await mammoth.extractRawText({ path: filePath })
-  return result.value
+  return { text: result.value }
 }
 
-async function parseText(filePath: string): Promise<string> {
-  return readFileSync(filePath, 'utf-8')
+async function parseText(filePath: string): Promise<{ text: string; images?: undefined }> {
+  return { text: readFileSync(filePath, 'utf-8') }
+}
+
+async function parseExcel(filePath: string): Promise<{ text: string; images?: undefined }> {
+  const XLSX = await import('xlsx')
+  const readFile = XLSX.default?.readFile ?? XLSX.readFile
+  const workbook = readFile(filePath)
+  const sheetToJson = XLSX.default?.utils?.sheet_to_json ?? XLSX.utils?.sheet_to_json
+  const lines: string[] = []
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName]
+    const rows = sheetToJson<Record<string, unknown>>(sheet, { defval: '' })
+    lines.push(`=== 工作表: ${sheetName} ===`)
+    if (rows.length > 0) {
+      const headers = Object.keys(rows[0])
+      lines.push(headers.join('\t'))
+      for (const row of rows) {
+        lines.push(headers.map(h => String(row[h] ?? '')).join('\t'))
+      }
+    }
+    lines.push('')
+  }
+
+  return { text: lines.join('\n') }
 }
 
 registerParser('.pdf', parsePdf)
 registerParser('.docx', parseWord)
 registerParser('.doc', parseWord)
+registerParser('.xlsx', parseExcel)
+registerParser('.xls', parseExcel)
 registerParser('.txt', parseText)
 registerParser('.md', parseText)
 registerParser('.markdown', parseText)
@@ -67,9 +153,10 @@ export async function parseFile(filePath: string): Promise<ParsedDocument> {
     )
   }
 
-  const text = await parser(filePath)
+  const result = await parser(filePath)
   return {
-    text,
+    text: result.text,
+    images: result.images,
     metadata: {
       source: filePath,
       fileName,
@@ -112,4 +199,22 @@ export async function parseDirectory(dirPath: string): Promise<ParsedDocument[]>
 
 export function getSupportedExtensions(): string[] {
   return Object.keys(parsers)
+}
+
+export function saveImageToPublic(
+  dataUrl: string,
+  fileName: string,
+  publicDir = resolve(process.cwd(), 'public', 'knowledge-images')
+): string {
+  if (!existsSync(publicDir)) {
+    mkdirSync(publicDir, { recursive: true })
+  }
+
+  const base64Data = dataUrl.split(',')[1]
+  const mimeType = dataUrl.split(',')[0].split(':')[1].split(';')[0]
+  const ext = mimeType === 'image/png' ? '.png' : mimeType === 'image/jpeg' ? '.jpg' : '.png'
+  const filePath = join(publicDir, fileName + ext)
+  writeFileSync(filePath, Buffer.from(base64Data, 'base64'))
+
+  return `/knowledge-images/${fileName + ext}`
 }
