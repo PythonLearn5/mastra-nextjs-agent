@@ -1,15 +1,9 @@
 import { NextResponse } from 'next/server'
 import { LibSQLVector } from '@mastra/libsql'
 import { embed } from 'ai'
-import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { EMBEDDING_PROVIDER_OPTIONS, knowledgeEmbedder } from '@/lib/knowledge-store'
 
 const INDEX_NAME = 'machine_tool_knowledge'
-
-const embedder = new ModelRouterEmbeddingModel({
-  id: 'zhipuai/embedding-3',
-  url: 'https://open.bigmodel.cn/api/paas/v4',
-  apiKey: process.env.ZHIPU_API_KEY!,
-})
 
 const vectorStore = new LibSQLVector({
   id: 'mastra-vector',
@@ -24,8 +18,9 @@ export async function GET(req: Request) {
     const topK = Number(searchParams.get('topK') || 5)
 
     const { embedding } = await embed({
-      model: embedder,
+      model: knowledgeEmbedder,
       value: query,
+      providerOptions: EMBEDDING_PROVIDER_OPTIONS,
     })
 
     const results = await vectorStore.query({

@@ -25,7 +25,7 @@ import {
     ConversationScrollButton,
 } from '@/components/ai-elements/conversation'
 
-import { MessageResponse } from '@/components/ai-elements/message'
+import { MessageResponse, knowledgeMarkdownComponents } from '@/components/ai-elements/message'
 
 import { Tool, ToolHeader, ToolContent, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
 
@@ -218,42 +218,79 @@ export function ChatPanel({ threadId, model, onTitleUpdate }: ChatPanelProps) {
                                             {message.parts?.map((part, i) => {
                                                 if (part.type === 'text') {
                                                     return (
-                                                        <MessageResponse key={`${message.id}-${i}`}>
+                                                        <MessageResponse
+                                                            key={`${message.id}-${i}`}
+                                                            components={knowledgeMarkdownComponents}
+                                                        >
                                                             {part.text}
                                                         </MessageResponse>
                                                     )
                                                 }
 
                                                 if (part.type?.startsWith('tool-')) {
+                                                    const toolPart = part as ToolUIPart
+                                                    const isImageTool =
+                                                        toolPart.type === 'tool-find-knowledge-images'
+                                                    const toolImages: Array<{
+                                                        id: string
+                                                        imageUrl: string
+                                                        description?: string
+                                                        sourceFile?: string
+                                                        page?: number | null
+                                                    }> =
+                                                        isImageTool &&
+                                                        Array.isArray((toolPart.output as { images?: unknown })?.images)
+                                                            ? ((toolPart.output as { images: typeof toolImages }).images)
+                                                            : []
+
                                                     return (
-                                                        <Tool key={`${message.id}-${i}`}>
-                                                            <ToolHeader
-                                                                type={(part as ToolUIPart).type}
-                                                                state={
-                                                                    (part as ToolUIPart).state ||
-                                                                    'output-available'
-                                                                }
-                                                                className="cursor-pointer"
-                                                            />
-                                                            <ToolContent>
-                                                                <ToolInput
-                                                                    input={
-                                                                        (part as ToolUIPart)
-                                                                            .input || {}
-                                                                    }
+                                                        <div key={`${message.id}-${i}`} className="space-y-3">
+                                                            {toolImages.length > 0 && (
+                                                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                                                    {toolImages.map(img => (
+                                                                        <a
+                                                                            key={img.id}
+                                                                            href={img.imageUrl}
+                                                                            target="_blank"
+                                                                            rel="noreferrer"
+                                                                            className="group overflow-hidden rounded-xl border border-border bg-background"
+                                                                        >
+                                                                            <img
+                                                                                src={img.imageUrl}
+                                                                                alt={img.description || img.id}
+                                                                                loading="lazy"
+                                                                                className="aspect-video w-full bg-muted/40 object-contain transition group-hover:scale-[1.02]"
+                                                                            />
+                                                                            <div className="space-y-1 px-3 py-2 text-xs text-muted-foreground">
+                                                                                <div className="line-clamp-2 text-foreground/80">
+                                                                                    {img.description
+                                                                                        ? `${img.description.slice(0, 80)}${img.description.length > 80 ? '…' : ''}`
+                                                                                        : img.id}
+                                                                                </div>
+                                                                                <div>
+                                                                                    {img.sourceFile}
+                                                                                    {img.page ? ` · 第${img.page}页` : ''}
+                                                                                </div>
+                                                                            </div>
+                                                                        </a>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                            <Tool>
+                                                                <ToolHeader
+                                                                    type={toolPart.type}
+                                                                    state={toolPart.state || 'output-available'}
+                                                                    className="cursor-pointer"
                                                                 />
-                                                                <ToolOutput
-                                                                    output={
-                                                                        (part as ToolUIPart)
-                                                                            .output
-                                                                    }
-                                                                    errorText={
-                                                                        (part as ToolUIPart)
-                                                                            .errorText
-                                                                    }
-                                                                />
-                                                            </ToolContent>
-                                                        </Tool>
+                                                                <ToolContent>
+                                                                    <ToolInput input={toolPart.input || {}} />
+                                                                    <ToolOutput
+                                                                        output={toolPart.output}
+                                                                        errorText={toolPart.errorText}
+                                                                    />
+                                                                </ToolContent>
+                                                            </Tool>
+                                                        </div>
                                                     )
                                                 }
 

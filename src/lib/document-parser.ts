@@ -1,13 +1,22 @@
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync } from 'fs'
 import { join, extname, basename, resolve } from 'path'
+import { ANCHOR_CLOSE, ANCHOR_PREFIX } from './knowledge-store'
 
 export interface ExtractedImage {
+  /**
+   * 图片锚点 ID（同时作为落盘文件名主干）。
+   * 文本中会以 ⟦img:ID⟧ 的形式保留图片位置，构建/回填全靠它对齐。
+   */
+  id: string
   dataUrl: string
   name: string
   width: number
   height: number
   sourceFile: string
-  pageNumber: number
+  /** 真实页码（1 起始）；解析不到为 null（如 mammoth 回退路径） */
+  page: number | null
+  /** 图注（MinerU caption 或 Markdown alt） */
+  caption?: string
 }
 
 export interface ParsedDocument {
@@ -32,6 +41,64 @@ export function registerParser(extension: string, fn: ParserFn) {
   parsers[ext] = fn
 }
 
+/** 文件名 → 安全的图片 ID 主干（保留 CJK，去掉路径/空白/锚点冲突字符） */
+export function sanitizeImageBase(fileName: string): string {
+  return fileName
+    .replace(/\.[^.]+$/, '')
+    .replace(/[\\/:*?"'<>|\s⟦⟧\[\]()!]+/g, '_')
+    .slice(0, 80)
+}
+
+/** 生成锚点标记文本 ⟦img:ID⟧ */
+export function imageAnchor(id: string): string {
+  return `${ANCHOR_PREFIX}${id}${ANCHOR_CLOSE}`
+}
+
+function anchorOf(id: string): string {
+  return imageAnchor(id)
+}
+
+/** MinerU 结果统一处理：真实页码/图注 + 把 md 图片引用替换为文本锚点 */
+function attachMinerUImages(
+  fileBase: string,
+  result: { mdContent: string; images: { name: string; dataUrl: string; page: number | null; caption?: string }[] },
+): { text: string; images: ExtractedImage[] } {
+  const safe = sanitizeImageBase(fileBase)
+  const images: ExtractedImage[] = []
+  const stemToId = new Map<string, string>()
+
+  result.images.forEach((img, i) => {
+    const id = `${safe}_p${img.page ?? 0}_${i + 1}`
+    images.push({
+      id,
+      dataUrl: img.dataUrl,
+      name: img.name,
+      width: 0,
+      height: 0,
+      sourceFile: fileBase,
+      page: img.page,
+      caption: img.caption,
+    })
+    const stem = img.name.replace(/\.[^.]+$/, '')
+    stemToId.set(stem, id)
+    stemToId.set(img.name, id)
+  })
+
+  // md_content 中的图片引用 ![alt](images/xxx.png) → ⟦img:ID⟧（位置保留在原文）
+  const text = result.mdContent.replace(
+    /!\[([^\]]*)\]\((?:[^)\s]*?)([\w.-]+\.(?:png|jpe?g|gif|webp|bmp))[)]/gi,
+    (m, alt: string, fileName: string) => {
+      const id = stemToId.get(fileName) ?? stemToId.get(fileName.replace(/\.[^.]+$/, ''))
+      if (!id) return m
+      const hit = images.find(img => img.id === id)
+      if (hit && !hit.caption && alt.trim()) hit.caption = alt.trim()
+      return anchorOf(id)
+    },
+  )
+
+  return { text, images }
+}
+
 async function parsePdf(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
   const fileBase = basename(filePath)
   const mineruUrl = process.env.MINERU_API_URL
@@ -41,16 +108,9 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
     try {
       const { parseWithMinerU } = await import('./mineru-client')
       const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
-      const images: ExtractedImage[] = result.images.map((img, i) => ({
-        dataUrl: img.dataUrl,
-        name: img.name,
-        width: 0,
-        height: 0,
-        sourceFile: fileBase,
-        pageNumber: i + 1,
-      }))
-      console.log(`  ${fileBase}: MinerU 完成，${result.mdContent.length} 字符，${images.length} 张图片`)
-      return { text: result.mdContent, images }
+      const parsed = attachMinerUImages(fileBase, result)
+      console.log(`  ${fileBase}: MinerU 完成，${parsed.text.length} 字符，${parsed.images.length} 张图片（已锚点化）`)
+      return parsed
     } catch (err) {
       console.warn(`  ${fileBase}: MinerU 失败（${err instanceof Error ? err.message : err}），回退到 pdf-parse…`)
     }
@@ -61,6 +121,7 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
   const pdf = new PDFParse({ data: new Uint8Array(buffer) })
   const textResult = await pdf.getText()
 
+  const safe = sanitizeImageBase(fileBase)
   const images: ExtractedImage[] = []
   try {
     const imageResult = await pdf.getImage({ imageDataUrl: true, imageThreshold: 100 })
@@ -68,12 +129,13 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
       for (const img of page.images) {
         if (img.dataUrl && img.width >= 100 && img.height >= 100) {
           images.push({
+            id: `${safe}_p${page.pageNumber}_${images.length + 1}`,
             dataUrl: img.dataUrl,
             name: img.name || `image_p${page.pageNumber}`,
             width: img.width,
             height: img.height,
             sourceFile: fileBase,
-            pageNumber: page.pageNumber,
+            page: page.pageNumber,
           })
         }
       }
@@ -86,12 +148,13 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
       for (const page of screenshotResult.pages) {
         if (page.dataUrl && page.width >= 100 && page.height >= 100) {
           images.push({
+            id: `${safe}_p${page.pageNumber}_${images.length + 1}`,
             dataUrl: page.dataUrl,
             name: `screenshot_p${page.pageNumber}`,
             width: page.width,
             height: page.height,
             sourceFile: fileBase,
-            pageNumber: page.pageNumber,
+            page: page.pageNumber,
           })
         }
       }
@@ -114,16 +177,9 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
     try {
       const { parseWithMinerU } = await import('./mineru-client')
       const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
-      const images: ExtractedImage[] = result.images.map((img, i) => ({
-        dataUrl: img.dataUrl,
-        name: img.name,
-        width: 0,
-        height: 0,
-        sourceFile: fileBase,
-        pageNumber: i + 1,
-      }))
-      console.log(`  ${fileBase}: MinerU 完成，${result.mdContent.length} 字符，${images.length} 张图片`)
-      return { text: result.mdContent, images }
+      const parsed = attachMinerUImages(fileBase, result)
+      console.log(`  ${fileBase}: MinerU 完成，${parsed.text.length} 字符，${parsed.images.length} 张图片（已锚点化）`)
+      return parsed
     } catch (err) {
       console.warn(`  ${fileBase}: MinerU 失败（${err instanceof Error ? err.message : err}），回退到 mammoth…`)
     }
@@ -133,7 +189,7 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
   const buffer = readFileSync(filePath)
 
   const images: ExtractedImage[] = []
-  let imgIdx = 0
+  const safe = sanitizeImageBase(fileBase)
 
   const htmlResult = await mammoth.convertToHtml(
     { buffer },
@@ -143,23 +199,27 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
         const base64 = buf.toString('base64')
         const ext = image.contentType === 'image/jpeg' ? 'jpg' : 'png'
         const dataUrl = `data:image/${ext};base64,${base64}`
-        imgIdx++
-        const imgName = `${fileBase.replace(/\.[^.]+$/, '')}_img${imgIdx}`
+        const id = `${safe}_img${images.length + 1}`
         images.push({
+          id,
           dataUrl,
-          name: imgName,
+          name: id,
           width: 0,
           height: 0,
           sourceFile: fileBase,
-          pageNumber: imgIdx,
+          page: null,
         })
-        return { src: dataUrl }
+        // src 里直接放锚点标记，HTML 转文本时保留位置（不再丢图）
+        return { src: anchorOf(id) }
       }),
     }
   )
 
   const text = htmlResult.value
-    .replace(/<img[^>]*>/g, ' ')
+    // <img src="⟦img:ID⟧"> → 保留锚点本身；其他 img 丢弃
+    .replace(/<img[^>]*\bsrc="([^"]*)"[^>]*>/gi, (_m, src: string) =>
+      src.startsWith(ANCHOR_PREFIX) ? src : ' ',
+    )
     .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -170,7 +230,7 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
     .replace(/\s+/g, ' ')
     .trim()
 
-  console.log(`  ${fileBase}: 提取到 ${images.length} 张嵌入图片`)
+  console.log(`  ${fileBase}: 提取到 ${images.length} 张嵌入图片（Word 无页码，page=null）`)
 
   return { text, images }
 }
@@ -283,9 +343,10 @@ export function getSupportedExtensions(): string[] {
   return Object.keys(parsers)
 }
 
+/** 落盘图片，返回可访问 URL；文件名即锚点 ID */
 export function saveImageToPublic(
   dataUrl: string,
-  fileName: string,
+  imageId: string,
   publicDir = resolve(process.cwd(), 'public', 'knowledge-images')
 ): string {
   if (!existsSync(publicDir)) {
@@ -295,8 +356,8 @@ export function saveImageToPublic(
   const base64Data = dataUrl.split(',')[1]
   const mimeType = dataUrl.split(',')[0].split(':')[1].split(';')[0]
   const ext = mimeType === 'image/png' ? '.png' : mimeType === 'image/jpeg' ? '.jpg' : '.png'
-  const filePath = join(publicDir, fileName + ext)
+  const filePath = join(publicDir, imageId + ext)
   writeFileSync(filePath, Buffer.from(base64Data, 'base64'))
 
-  return `/knowledge-images/${fileName + ext}`
+  return `/knowledge-images/${imageId + ext}`
 }

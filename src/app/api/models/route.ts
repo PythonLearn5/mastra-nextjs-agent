@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 
 const AVAILABLE_MODELS = [
-  { id: 'zhipuai/glm-5.2', name: 'GLM 5.2（智谱）' },
-  { id: 'zhipuai/glm-4-flash', name: 'GLM 4 Flash（智谱·轻量）' },
+  { id: 'alibaba-cn/qwen3.8-flash', name: 'Qwen3.8 Flash（通义·多模态）' },
+  { id: 'alibaba-cn/qwen-flash', name: 'Qwen Flash（通义·轻量）' },
   { id: 'openai/gpt-4o-mini', name: 'GPT-4o mini（OpenAI）' },
 ]
 

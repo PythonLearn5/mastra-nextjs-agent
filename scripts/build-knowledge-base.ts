@@ -1,19 +1,31 @@
 import 'dotenv/config'
 import { resolve, join } from 'path'
-import { readdirSync, unlinkSync, existsSync, statSync } from 'fs'
+import { readdirSync, unlinkSync, existsSync, statSync, mkdirSync, writeFileSync } from 'fs'
 import { MDocument } from '@mastra/rag'
-import { LibSQLVector } from '@mastra/libsql'
-import { embedMany, generateText } from 'ai'
-import { ModelRouterEmbeddingModel, ModelRouterLanguageModel } from '@mastra/core/llm'
+import { embedMany } from 'ai'
 import {
   parseDirectory,
   getSupportedExtensions,
   saveImageToPublic,
+  sanitizeImageBase,
+  imageAnchor,
   type ExtractedImage,
 } from '../src/lib/document-parser'
+import {
+  EMBEDDING_DIMENSIONS,
+  EMBEDDING_PROVIDER_OPTIONS,
+  KNOWLEDGE_INDEX_NAME,
+  extractImageIds,
+  getKnowledgeVectorStore,
+  knowledgeEmbedder,
+  knowledgeImagesDir,
+  stripAnchors,
+  stripIncompleteAnchorFragments,
+  type KnowledgeImageEntry,
+  type KnowledgeImageManifest,
+} from '../src/lib/knowledge-store'
 
-const INDEX_NAME = 'machine_tool_knowledge'
-const EMBEDDING_DIMENSIONS = 2048
+const vectorStore = getKnowledgeVectorStore()
 
 function clearDirectory(dirPath: string) {
   if (!existsSync(dirPath)) return
@@ -26,55 +38,44 @@ function clearDirectory(dirPath: string) {
   }
 }
 
-const embedder = new ModelRouterEmbeddingModel({
-  id: 'zhipuai/embedding-3',
-  url: 'https://open.bigmodel.cn/api/paas/v4',
-  apiKey: process.env.ZHIPU_API_KEY!,
-})
-
-const visionModel = new ModelRouterLanguageModel({
-  id: 'zhipuai/glm-4.5v',
-  url: 'https://open.bigmodel.cn/api/paas/v4',
-  apiKey: process.env.ZHIPU_API_KEY!,
-})
-
-const vectorStore = new LibSQLVector({
-  id: 'mastra-vector',
-  url: process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db',
-  authToken: process.env.TURSO_AUTH_TOKEN,
-})
-
-async function describeImage(
-  image: ExtractedImage,
-  index: number
-): Promise<{ description: string; imageUrl: string } | null> {
+async function describeImage(image: ExtractedImage): Promise<string | null> {
   try {
-    const safeName = `${image.sourceFile.replace(/\.[^.]+$/, '')}_p${image.pageNumber}_${index}`
-    const imageUrl = saveImageToPublic(image.dataUrl, safeName)
-    console.log(`     已保存图片: ${imageUrl}`)
-
-    const dataUrlSize = Math.round(image.dataUrl.length * 0.75 / 1024)
+    const dataUrlSize = Math.round((image.dataUrl.length * 0.75) / 1024)
     console.log(`     图片大小: ~${dataUrlSize}KB，调用视觉模型…`)
-
-    const result = await generateText({
-      model: visionModel as any,
-      maxOutputTokens: 1000,
-      abortSignal: AbortSignal.timeout(60000),
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', image: image.dataUrl },
-            {
-              type: 'text',
-              text: '请用中文简要描述这张图片的内容，重点说明其中的技术信息（文字、数据、图表）。不超过300字。',
-            },
-          ],
-        },
-      ],
+    // 直连 DashScope OpenAI 兼容接口（qwen3.8-flash 支持图片输入）
+    const res = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
+      },
+      signal: AbortSignal.timeout(60000),
+      body: JSON.stringify({
+        model: 'qwen3.8-flash',
+        max_tokens: 1024,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: image.dataUrl } },
+              {
+                type: 'text',
+                text: '请用中文简要描述这张图片的内容，重点说明其中的技术信息（文字、数据、图表）。不超过300字。',
+              },
+            ],
+          },
+        ],
+      }),
     })
-
-    return { description: result.text, imageUrl }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+    }
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string; reasoning_content?: string } }[]
+    }
+    const msg = data.choices?.[0]?.message
+    const text = (msg?.content?.trim() || msg?.reasoning_content?.trim() || '')
+    return text || null
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error(`     图片识别失败: ${msg}`)
@@ -84,7 +85,7 @@ async function describeImage(
 
 async function main() {
   const kbDir = resolve(process.cwd(), 'knowledge-base')
-  const imagesDir = resolve(process.cwd(), 'public', 'knowledge-images')
+  const imagesDir = knowledgeImagesDir()
 
   console.log(`\n🧹 清理旧数据…`)
   clearDirectory(imagesDir)
@@ -93,7 +94,7 @@ async function main() {
   console.log(`\n📁 知识库目录: ${kbDir}`)
   console.log(`📋 支持的格式: ${getSupportedExtensions().join(', ')}\n`)
 
-  console.log('1️⃣  解析文档…')
+  console.log('1️⃣  解析文档（文本已内联图片锚点 ⟦img:ID⟧）…')
   const documents = await parseDirectory(kbDir)
   if (documents.length === 0) {
     console.error('❌ 未找到任何可解析的文档。请将 PDF/Word/TXT 等文件放入 knowledge-base/ 目录。')
@@ -110,60 +111,66 @@ async function main() {
   }
   console.log(`   共 ${documents.length} 个文件, ${totalImages} 张图片`)
 
-  console.log('\n2️⃣  识别图片内容…')
-  const imageDescriptions: { text: string; imageUrl: string; sourceFile: string }[] = []
-  const imagePathMap: Map<string, string> = new Map()
+  console.log('\n2️⃣  保存图片 + 识别图片内容…')
+  const manifest: KnowledgeImageManifest = {}
+  const imageChunks: { displayText: string; embedText: string; metadata: Record<string, unknown> }[] = []
 
   if (totalImages > 0) {
     let imgIdx = 0
     for (const doc of documents) {
-      if (!doc.images || doc.images.length === 0) continue
-      for (let i = 0; i < doc.images.length; i++) {
+      for (const img of doc.images ?? []) {
         imgIdx++
-        const img = doc.images[i]
-
+        const pageLabel = img.page ? `p${img.page}` : 'p?'
         if (!img.dataUrl) {
-          const placeholderUrl = `/knowledge-images/placeholder_${imgIdx}.txt`
-          imagePathMap.set(img.name, placeholderUrl)
-          imagePathMap.set(`images/${img.name}`, placeholderUrl)
-          console.log(`   跳过 ${imgIdx}/${totalImages}: ${img.sourceFile} (无 data URL, 原始路径: ${img.name})`)
+          console.log(`   跳过 ${imgIdx}/${totalImages}: ${img.sourceFile} ${pageLabel}（无 data URL）`)
           continue
         }
+        console.log(`   处理 ${imgIdx}/${totalImages}: ${img.sourceFile} ${pageLabel}（id=${img.id}）…`)
 
-        console.log(`   识别 ${imgIdx}/${totalImages}: ${img.sourceFile} p${img.pageNumber}…`)
-        const result = await describeImage(img, i)
-        if (result) {
-          imageDescriptions.push({
-            text: result.description,
-            imageUrl: result.imageUrl,
-            sourceFile: img.sourceFile,
-          })
-          const origName = img.name || `${img.sourceFile.replace(/\.[^.]+$/, '')}_img${i + 1}`
-          imagePathMap.set(origName, result.imageUrl)
-          imagePathMap.set(`images/${origName}`, result.imageUrl)
-          console.log(`   → 已保存: ${result.imageUrl} (${result.description.length} 字符)`)
+        // 先落盘：即使视觉描述失败，锚点也能回填成真实图片
+        const imageUrl = saveImageToPublic(img.dataUrl, img.id)
+        const description = (await describeImage(img)) ?? ''
+        const entry: KnowledgeImageEntry = {
+          id: img.id,
+          url: imageUrl,
+          description: description || undefined,
+          caption: img.caption,
+          sourceFile: img.sourceFile,
+          page: img.page,
         }
+        manifest[img.id] = entry
+
+        const captionPart = img.caption ? `${img.caption}。` : ''
+        if (description || img.caption) {
+          imageChunks.push({
+            displayText: `${imageAnchor(img.id)} ${captionPart}${description}`,
+            embedText: `${captionPart}${description || '文档插图'}`,
+            metadata: {
+              source: img.sourceFile,
+              fileName: img.sourceFile,
+              extension: '.image',
+              type: 'image-description',
+              imageId: img.id,
+              imageUrl,
+              page: img.page,
+              caption: img.caption ?? null,
+              imageIds: [img.id],
+            },
+          })
+        }
+        console.log(`   → 已保存: ${imageUrl}（描述 ${description.length} 字符${img.caption ? '，有图注' : ''}）`)
       }
     }
   } else {
     console.log('   无图片需要识别')
   }
 
-  for (const doc of documents) {
-    let modified = false
-    for (const [origName, url] of imagePathMap) {
-      if (doc.text.includes(origName)) {
-        doc.text = doc.text.split(origName).join(url)
-        modified = true
-      }
-    }
-    if (modified) {
-      console.log(`   替换图片路径: ${doc.metadata.fileName}`)
-    }
-  }
+  if (!existsSync(imagesDir)) mkdirSync(imagesDir, { recursive: true })
+  writeFileSync(join(imagesDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
+  console.log(`   已写入图片清单: ${join(imagesDir, 'manifest.json')}（${Object.keys(manifest).length} 条）`)
 
-  console.log('\n3️⃣  分块（文本 + 图片描述）…')
-  const allChunks: { text: string; metadata: Record<string, unknown> }[] = []
+  console.log('\n3️⃣  分块（文本块保留锚点，嵌入文本剥离锚点）…')
+  const allChunks: { displayText: string; embedText: string; metadata: Record<string, unknown>; id: string }[] = []
 
   for (const doc of documents) {
     const md = MDocument.fromText(doc.text, doc.metadata)
@@ -172,48 +179,35 @@ async function main() {
       maxSize: 512,
       overlap: 50,
     })
-    for (const chunk of chunks) {
+    const idBase = sanitizeImageBase(doc.metadata.fileName)
+    chunks.forEach((chunk, i) => {
+      const displayText = stripIncompleteAnchorFragments(chunk.text)
+      const embedText = stripAnchors(displayText)
+      if (!embedText) return
       allChunks.push({
-        text: chunk.text,
+        displayText,
+        embedText,
+        id: `${idBase}::t${i}`,
         metadata: {
           ...doc.metadata,
           ...chunk.metadata,
+          imageIds: extractImageIds(displayText),
         },
       })
-    }
+    })
     console.log(`   ${doc.metadata.fileName} → ${chunks.length} 块`)
   }
 
-  for (const desc of imageDescriptions) {
-    const md = MDocument.fromText(desc.text, {
-      source: desc.sourceFile,
-      fileName: desc.sourceFile,
-      extension: '.image',
-      imageUrl: desc.imageUrl,
-      type: 'image-description',
+  for (const imgChunk of imageChunks) {
+    allChunks.push({
+      displayText: imgChunk.displayText,
+      embedText: imgChunk.embedText,
+      id: `img::${String(imgChunk.metadata.imageId)}`,
+      metadata: imgChunk.metadata,
     })
-    const chunks = await md.chunk({
-      strategy: 'recursive',
-      maxSize: 512,
-      overlap: 50,
-    })
-    for (const chunk of chunks) {
-      allChunks.push({
-        text: chunk.text,
-        metadata: {
-          source: desc.sourceFile,
-          fileName: desc.sourceFile,
-          extension: '.image',
-          imageUrl: desc.imageUrl,
-          type: 'image-description',
-          ...chunk.metadata,
-        },
-      })
-    }
-    console.log(`   ${desc.sourceFile} 图片描述 → ${chunks.length} 块`)
   }
 
-  console.log(`   共 ${allChunks.length} 个文本块\n`)
+  console.log(`   共 ${allChunks.length} 个文本块（含 ${imageChunks.length} 个图片描述块）\n`)
 
   console.log('4️⃣  向量化…')
   const batchSize = 50
@@ -221,8 +215,9 @@ async function main() {
   for (let i = 0; i < allChunks.length; i += batchSize) {
     const batch = allChunks.slice(i, i + batchSize)
     const { embeddings } = await embedMany({
-      model: embedder,
-      values: batch.map(c => c.text),
+      model: knowledgeEmbedder,
+      values: batch.map(c => c.embedText),
+      providerOptions: EMBEDDING_PROVIDER_OPTIONS,
     })
     allEmbeddings.push(...embeddings)
     console.log(`   已处理 ${Math.min(i + batchSize, allChunks.length)}/${allChunks.length} 块`)
@@ -230,35 +225,33 @@ async function main() {
 
   console.log('\n5️⃣  写入向量库…')
   try {
-    await vectorStore.deleteIndex({ indexName: INDEX_NAME })
-    console.log(`   已清除旧索引: ${INDEX_NAME}`)
+    await vectorStore.deleteIndex({ indexName: KNOWLEDGE_INDEX_NAME })
+    console.log(`   已清除旧索引: ${KNOWLEDGE_INDEX_NAME}`)
   } catch {
     // 索引不存在，忽略
   }
 
   await vectorStore.createIndex({
-    indexName: INDEX_NAME,
+    indexName: KNOWLEDGE_INDEX_NAME,
     dimension: EMBEDDING_DIMENSIONS,
   })
 
   await vectorStore.upsert({
-    indexName: INDEX_NAME,
+    indexName: KNOWLEDGE_INDEX_NAME,
+    ids: allChunks.map(c => c.id),
     vectors: allEmbeddings,
     metadata: allChunks.map(c => ({
       ...c.metadata,
-      text: c.text,
+      text: c.displayText,
     })),
   })
 
   console.log(`\n✅ 知识库构建完成！`)
-  console.log(`   索引名: ${INDEX_NAME}`)
+  console.log(`   索引名: ${KNOWLEDGE_INDEX_NAME}`)
   console.log(`   向量数: ${allEmbeddings.length}`)
   console.log(`   维度: ${EMBEDDING_DIMENSIONS}`)
   console.log(`   来源文件: ${documents.length}`)
-  console.log(`   图片描述: ${imageDescriptions.length}`)
-  if (imageDescriptions.length > 0) {
-    console.log(`   图片路径: /knowledge-images/`)
-  }
+  console.log(`   图片: ${Object.keys(manifest).length} 张（其中 ${imageChunks.length} 张有可检索描述）`)
   console.log('')
 }
 

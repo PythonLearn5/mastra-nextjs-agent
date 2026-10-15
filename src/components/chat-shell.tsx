@@ -6,7 +6,7 @@ import { AppSidebar, type ChatThread } from '@/components/app-sidebar'
 import { TopBar, type ModelOption } from '@/components/top-bar'
 import { ChatPanel } from '@/components/chat-panel'
 
-const DEFAULT_MODEL = 'zhipuai/glm-5.2'
+const DEFAULT_MODEL = 'alibaba-cn/qwen3.8-flash'
 
 interface ChatShellProps {
     models?: ModelOption[]

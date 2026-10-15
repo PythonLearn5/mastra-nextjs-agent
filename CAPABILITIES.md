@@ -38,7 +38,7 @@
 
 **模型切换**
 - 顶部栏下拉选择模型，切换后对后续发送生效
-- 当前可选：`zhipuai/glm-5.2`、`zhipuai/glm-4-flash`、`openai/gpt-4o-mini`
+- 当前可选：`alibaba-cn/qwen3.8-flash`、`alibaba-cn/qwen-flash`、`openai/gpt-4o-mini`
 - 模型通过 `handleChatStream` 的 `params.model` 运行时覆盖 Agent 默认配置
 
 ### 2. 会话管理
@@ -59,7 +59,7 @@
 
 **Weather Agent**
 - ID: `weather-agent`
-- 默认模型: `zhipuai/glm-5.2`
+- 默认模型: `alibaba-cn/qwen3.8-flash`
 - 内置工具: `weatherTool`（`get-weather`）
 - 指令特点:
   - 未提供地点时主动询问
@@ -155,7 +155,7 @@
 
 ### 新增模型
 1. 在 `src/app/api/models/route.ts` 的 `AVAILABLE_MODELS` 添加条目
-2. 确保对应环境变量已配置（如 `ZHIPU_API_KEY`、`OPENAI_API_KEY`）
+2. 确保对应环境变量已配置（如 `DASHSCOPE_API_KEY`、`OPENAI_API_KEY`）
 
 ### 切换到 Turso 远程数据库
 1. 在 `.env.local` 设置 `TURSO_DATABASE_URL=libsql://...` 和 `TURSO_AUTH_TOKEN=...`

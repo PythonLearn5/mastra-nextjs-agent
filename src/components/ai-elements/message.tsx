@@ -341,6 +341,59 @@ export const MessageResponse = memo(
 
 MessageResponse.displayName = "MessageResponse";
 
+/**
+ * 知识库 Markdown 图片渲染：懒加载 + 点击灯箱放大。
+ * 服务端锚点回填产出的 ![alt](/knowledge-images/xxx.png) 走这里渲染。
+ */
+export function KnowledgeMarkdownImg({
+  className,
+  onClick,
+  ...props
+}: ComponentProps<"img"> & { node?: unknown }) {
+  const [zoomed, setZoomed] = useState(false);
+
+  return (
+    <>
+      <img
+        {...props}
+        loading="lazy"
+        onClick={event => {
+          onClick?.(event);
+          if (props.src) setZoomed(true);
+        }}
+        className={cn(
+          "my-3 max-h-96 cursor-zoom-in rounded-lg border border-border bg-muted/30 object-contain",
+          className
+        )}
+      />
+      {zoomed && props.src ? (
+        <div
+          role="dialog"
+          aria-label="图片预览"
+          className="fixed inset-0 z-50 flex cursor-zoom-out flex-col items-center justify-center gap-3 bg-black/85 p-6"
+          onClick={() => setZoomed(false)}
+        >
+          <img
+            src={props.src}
+            alt={props.alt ?? ""}
+            className="max-h-[82vh] max-w-full rounded-lg bg-white object-contain"
+          />
+          {props.alt ? (
+            <div className="max-w-3xl text-center text-sm text-white/85">
+              {props.alt}
+            </div>
+          ) : null}
+          <div className="text-xs text-white/50">点击任意处关闭</div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+export const knowledgeMarkdownComponents: MessageResponseProps["components"] = {
+  img: KnowledgeMarkdownImg,
+};
+
 export type MessageToolbarProps = ComponentProps<"div">;
 
 export const MessageToolbar = ({

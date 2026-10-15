@@ -5,13 +5,17 @@ import { LibSQLStore, LibSQLVector } from '@mastra/libsql';
 import { Observability, MastraStorageExporter, MastraPlatformExporter, SensitiveDataFilter } from '@mastra/observability';
 import { weatherWorkflow } from './workflows/weather-workflow';
 import { weatherAgent } from './agents/weather-agent';
+import { machineToolAgent } from './agents/machine-tool-agent';
+import { knowledgeBaseTool } from './tools/knowledge-base-tool';
+import { findKnowledgeImagesTool } from './tools/find-knowledge-images-tool';
 
 const dbUrl = process.env.TURSO_DATABASE_URL ?? 'file:./mastra.db';
 const dbAuthToken = process.env.TURSO_AUTH_TOKEN;
 
 export const mastra = new Mastra({
   workflows: { weatherWorkflow },
-  agents: { weatherAgent },
+  agents: { weatherAgent, machineToolAgent },
+  tools: { knowledgeBaseTool, findKnowledgeImagesTool },
   storage: new LibSQLStore({
     id: 'mastra-storage',
     url: dbUrl,

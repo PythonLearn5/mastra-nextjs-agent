@@ -16,7 +16,7 @@ npm run dev
 在项目根目录创建 `.env.local`：
 
 ```env
-ZHIPU_API_KEY=你的智谱API Key
+DASHSCOPE_API_KEY=你的阿里云百炼API Key
 ```
 
 ## 文档

@@ -77,7 +77,7 @@ mastra-nextjs-agent/
 ┌──────────────────────────────┴──────────────────────────┐
 │ Mastra 层                                                │
 │  Mastra 实例（src/mastra/index.ts）                      │
-│   ├ Agents: weatherAgent（zhipuai/glm-5.2）             │
+│   ├ Agents: weatherAgent（alibaba-cn/qwen3.8-flash）    │
 │   ├ Workflows: weatherWorkflow（fetchWeather→plan）      │
 │   ├ Storage: LibSQLStore（mastra.db / Turso）           │
 │   ├ Memory: LibSQLStore（weather-agent-memory）         │
@@ -131,7 +131,7 @@ ChatShell
 
 ### Mastra 配置
 
-- **Agent**：`weather-agent`，模型 `zhipuai/glm-5.2`，挂载 `weatherTool`
+- **Agent**：`weather-agent`，模型 `alibaba-cn/qwen3.8-flash`，挂载 `weatherTool`
 - **Workflow**：`weatherWorkflow`（`fetch-weather` → `plan-activities`）
 - **Storage**：`LibSQLStore`，url 取 `TURSO_DATABASE_URL`，fallback `file:./mastra.db`
 - **Memory**：独立 `LibSQLStore`（id: `weather-agent-memory`），url 同上
@@ -161,7 +161,7 @@ npm run lint
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `ZHIPU_API_KEY` | 是 | 智谱模型 API Key（`zhipuai/glm-5.2` 等） |
+| `DASHSCOPE_API_KEY` | 是 | 阿里云百炼 API Key（`alibaba-cn/qwen3.8-flash` 对话/视觉、`text-embedding-v4` 嵌入） |
 | `TURSO_DATABASE_URL` | 否 | LibSQL/Turso 数据库地址，未设置时 fallback `file:./mastra.db` |
 | `TURSO_AUTH_TOKEN` | 否 | Turso 访问令牌（本地文件模式不需要） |
 | `MASTRA_PLATFORM_ACCESS_TOKEN` | 否 | Mastra Platform 导出令牌（可选） |

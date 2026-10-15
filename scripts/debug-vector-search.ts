@@ -1,16 +1,9 @@
 import 'dotenv/config'
-import { resolve } from 'path'
 import { LibSQLVector } from '@mastra/libsql'
 import { embed } from 'ai'
-import { ModelRouterEmbeddingModel } from '@mastra/core/llm'
+import { EMBEDDING_PROVIDER_OPTIONS, knowledgeEmbedder } from '../src/lib/knowledge-store'
 
 const INDEX_NAME = 'machine_tool_knowledge'
-
-const embedder = new ModelRouterEmbeddingModel({
-  id: 'zhipuai/embedding-3',
-  url: 'https://open.bigmodel.cn/api/paas/v4',
-  apiKey: process.env.ZHIPU_API_KEY!,
-})
 
 const vectorStore = new LibSQLVector({
   id: 'mastra-vector',
@@ -27,8 +20,9 @@ async function main() {
 
   console.log('1️⃣  生成查询向量…')
   const { embedding } = await embed({
-    model: embedder,
+    model: knowledgeEmbedder,
     value: query,
+    providerOptions: EMBEDDING_PROVIDER_OPTIONS,
   })
   console.log(`   向量维度: ${embedding.length}\n`)
 

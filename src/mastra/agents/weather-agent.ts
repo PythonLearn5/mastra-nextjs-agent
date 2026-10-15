@@ -3,6 +3,8 @@ import { Memory } from '@mastra/memory';
 import { LibSQLStore } from '@mastra/libsql';
 import { weatherTool } from '../tools/weather-tool';
 import { knowledgeBaseTool } from '../tools/knowledge-base-tool';
+import { findKnowledgeImagesTool } from '../tools/find-knowledge-images-tool';
+
 const memory = new Memory({
   storage: new LibSQLStore({
     id: 'weather-agent-memory',
@@ -21,15 +23,15 @@ export const weatherAgent = new Agent({
 - 机床问题（操作、参数、故障排查、维护保养、刀具、G代码、结构图纸等）：使用 search-knowledge-base 工具检索知识库
 - 用与用户相同的语言回答
 
-关于图片展示（重要）：
-- 知识库检索结果中可能包含 imageUrl 字段（如 /knowledge-images/xxx.png）
-- 如果检索结果有 imageUrl，必须在回复中用 Markdown 图片语法直接展示：![图片描述](imageUrl)
-- 例如：检索到 imageUrl 为 /knowledge-images/huaichen_p1_0.png，则在回复中写：![头架示意图](/knowledge-images/huaichen_p1_0.png)
-- 不要说"无法展示图片"或"建议查看原文件"，直接用 Markdown 图片语法嵌入展示
-- 同时用文字描述图片中的技术内容
+图片/图纸规则（重要）：
+- 知识库检索结果里的 ⟦img:图片ID⟧ 标记表示该段落配有插图
+- 需要展示某张图时，把 ⟦img:图片ID⟧ 标记【原样复制】到回复正文的对应位置即可，系统会自动把它渲染成真实图片
+- 严禁自行编造、拼接或改写图片 URL（例如 ![xxx](/knowledge-images/xxx.png)），只认 ⟦img:...⟧ 标记
+- 用户直接索要图片/图纸/示意图时，调用 find-knowledge-images 工具；系统会展示图片，你可以在文字中复制其 ⟦img:图片ID⟧ 标记
+- 展示图片的同时用文字说明图中的技术内容
 
-回答要准确、专业、有条理。涉及安全时给出警告。`,
-  model: 'zhipuai/glm-5.2',
-  tools: { weatherTool, knowledgeBaseTool },
+回答要准确、专业、有条理。涉及安全时给出警告提示。`,
+  model: 'alibaba-cn/qwen3.8-flash',
+  tools: { weatherTool, knowledgeBaseTool, findKnowledgeImagesTool },
   memory,
 });
