@@ -48,3 +48,6 @@ mastra.db
 mastra.db-shm
 mastra.db-wal
 /public/knowledge-images/
+/.yarnrc.yml
+/package-lock.json
+/.yarn/
