@@ -58,23 +58,41 @@ function anchorOf(id: string): string {
   return imageAnchor(id)
 }
 
+/**
+ * 回退路径（MinerU / mammoth）拿到的都是未裁剪的原始嵌入图，
+ * 这里至少做限尺寸 + 压缩，避免整张超大截图落盘并送视觉模型。
+ */
+async function normalizeDataUrl(
+  dataUrl: string
+): Promise<{ dataUrl: string; width: number; height: number } | null> {
+  try {
+    const { normalizeImageDataUrl } = await import('./docx-ooxml')
+    const out = await normalizeImageDataUrl(dataUrl)
+    if (!out) return null
+    return { dataUrl: out.dataUrl, width: out.width, height: out.height }
+  } catch {
+    return null
+  }
+}
+
 /** MinerU 结果统一处理：真实页码/图注 + 把 md 图片引用替换为文本锚点 */
-function attachMinerUImages(
+async function attachMinerUImages(
   fileBase: string,
   result: { mdContent: string; images: { name: string; dataUrl: string; page: number | null; caption?: string }[] },
-): { text: string; images: ExtractedImage[] } {
+): Promise<{ text: string; images: ExtractedImage[] }> {
   const safe = sanitizeImageBase(fileBase)
   const images: ExtractedImage[] = []
   const stemToId = new Map<string, string>()
 
-  result.images.forEach((img, i) => {
-    const id = `${safe}_p${img.page ?? 0}_${i + 1}`
+  for (const img of result.images) {
+    const id = `${safe}_p${img.page ?? 0}_${images.length + 1}`
+    const normalized = await normalizeDataUrl(img.dataUrl)
     images.push({
       id,
-      dataUrl: img.dataUrl,
+      dataUrl: normalized?.dataUrl ?? img.dataUrl,
       name: img.name,
-      width: 0,
-      height: 0,
+      width: normalized?.width ?? 0,
+      height: normalized?.height ?? 0,
       sourceFile: fileBase,
       page: img.page,
       caption: img.caption,
@@ -82,7 +100,7 @@ function attachMinerUImages(
     const stem = img.name.replace(/\.[^.]+$/, '')
     stemToId.set(stem, id)
     stemToId.set(img.name, id)
-  })
+  }
 
   // md_content 中的图片引用 ![alt](images/xxx.png) → ⟦img:ID⟧（位置保留在原文）
   const text = result.mdContent.replace(
@@ -108,7 +126,7 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
     try {
       const { parseWithMinerU } = await import('./mineru-client')
       const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
-      const parsed = attachMinerUImages(fileBase, result)
+      const parsed = await attachMinerUImages(fileBase, result)
       console.log(`  ${fileBase}: MinerU 完成，${parsed.text.length} 字符，${parsed.images.length} 张图片（已锚点化）`)
       return parsed
     } catch (err) {
@@ -170,14 +188,34 @@ async function parsePdf(filePath: string): Promise<{ text: string; images?: Extr
 
 async function parseWord(filePath: string): Promise<{ text: string; images?: ExtractedImage[] }> {
   const fileBase = basename(filePath)
+  const ext = extname(filePath).toLowerCase()
   const mineruUrl = process.env.MINERU_API_URL
+  const disableNative = process.env.DOCX_NATIVE_IMAGES === 'false'
 
+  // 1) 原生 OOXML：正文 + 按 Word 实际显示区域（srcRect 裁剪）取图，离线、确定性、体积小
+  if (ext === '.docx' && !disableNative) {
+    try {
+      const { parseDocxNative } = await import('./docx-ooxml')
+      const parsed = await parseDocxNative(filePath)
+      if (parsed.text.trim() || parsed.images.length > 0) {
+        console.log(
+          `  ${fileBase}: OOXML 原生解析完成，${parsed.text.length} 字符，${parsed.images.length} 张插图（已按 srcRect 裁剪/压缩）`
+        )
+        return parsed
+      }
+      console.warn(`  ${fileBase}: OOXML 原生解析无内容，回退…`)
+    } catch (err) {
+      console.warn(`  ${fileBase}: OOXML 原生解析失败（${err instanceof Error ? err.message : err}），回退到 MinerU…`)
+    }
+  }
+
+  // 2) MinerU：版面/表格效果更好，但拿到的是未裁剪的原始嵌入图
   if (mineruUrl) {
     console.log(`  ${fileBase}: 使用 MinerU 解析…`)
     try {
       const { parseWithMinerU } = await import('./mineru-client')
       const result = await parseWithMinerU(filePath, { apiUrl: mineruUrl })
-      const parsed = attachMinerUImages(fileBase, result)
+      const parsed = await attachMinerUImages(fileBase, result)
       console.log(`  ${fileBase}: MinerU 完成，${parsed.text.length} 字符，${parsed.images.length} 张图片（已锚点化）`)
       return parsed
     } catch (err) {
@@ -185,6 +223,7 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
     }
   }
 
+  // 3) mammoth：本地兜底，同样只做压缩（无法感知 srcRect 裁剪）
   const mammoth = await import('mammoth')
   const buffer = readFileSync(filePath)
 
@@ -196,16 +235,16 @@ async function parseWord(filePath: string): Promise<{ text: string; images?: Ext
     {
       convertImage: mammoth.images.imgElement(async (image) => {
         const buf = await image.read()
-        const base64 = buf.toString('base64')
-        const ext = image.contentType === 'image/jpeg' ? 'jpg' : 'png'
-        const dataUrl = `data:image/${ext};base64,${base64}`
+        const normalized = await normalizeDataUrl(`data:${image.contentType || 'image/png'};base64,${buf.toString('base64')}`)
+        // 解码失败就不登记图片，也不留锚点，避免正文里出现悬空引用
+        if (!normalized) return { src: '' }
         const id = `${safe}_img${images.length + 1}`
         images.push({
           id,
-          dataUrl,
+          dataUrl: normalized.dataUrl,
           name: id,
-          width: 0,
-          height: 0,
+          width: normalized.width,
+          height: normalized.height,
           sourceFile: fileBase,
           page: null,
         })
