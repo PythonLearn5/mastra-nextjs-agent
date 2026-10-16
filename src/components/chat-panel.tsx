@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { DefaultChatTransport, ToolUIPart } from 'ai'
 import { useChat } from '@ai-sdk/react'
 import { cn } from '@/lib/utils'
-import { GlobeIcon, ImageIcon, MicIcon, PaperclipIcon, SquareIcon } from 'lucide-react'
+import { ChevronDownIcon, GlobeIcon, ImageIcon, MicIcon, PaperclipIcon, SquareIcon, WrenchIcon } from 'lucide-react'
 
 import {
     PromptInput,
@@ -28,6 +28,107 @@ import {
 import { MessageResponse, knowledgeMarkdownComponents } from '@/components/ai-elements/message'
 
 import { Tool, ToolHeader, ToolContent, ToolInput, ToolOutput } from '@/components/ai-elements/tool'
+
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+
+const TOOL_LABELS: Record<string, string> = {
+    knowledgeBaseTool: '检索知识库',
+    findKnowledgeImagesTool: '查找知识库图片',
+}
+
+function getToolLabel(type: string) {
+    const rawName = type.split('-').slice(1).join('-')
+    return TOOL_LABELS[rawName] ?? rawName
+}
+
+function summarizeToolCalls(parts: ToolUIPart[]) {
+    const counts = new Map<string, number>()
+    for (const part of parts) {
+        const label = getToolLabel(part.type)
+        counts.set(label, (counts.get(label) ?? 0) + 1)
+    }
+    return Array.from(counts, ([label, count]) => (count > 1 ? `${label} ×${count}` : label)).join(' · ')
+}
+
+/** 一条紧凑提示汇总本轮所有工具调用，详情（入参/结果）折叠在下方按需展开。 */
+function ToolCallsSummary({ messageId, parts }: { messageId: string; parts: ToolUIPart[] }) {
+    const isPending = parts.some(
+        part => part.state !== 'output-available' && part.state !== 'output-error' && part.state !== 'output-denied'
+    )
+
+    return (
+        <Collapsible className="not-prose">
+            <CollapsibleTrigger className="flex w-full items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
+                <WrenchIcon className="size-3.5 shrink-0" />
+                <span>{summarizeToolCalls(parts)}</span>
+                {isPending && <span>进行中…</span>}
+                <ChevronDownIcon className="ml-auto size-3.5 shrink-0 opacity-60" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="mt-3 space-y-3">
+                {parts.map((toolPart, index) => {
+                    const isImageTool = toolPart.type === 'tool-find-knowledge-images'
+                    const toolImages: Array<{
+                        id: string
+                        imageUrl: string
+                        description?: string
+                        sourceFile?: string
+                        page?: number | null
+                    }> =
+                        isImageTool && Array.isArray((toolPart.output as { images?: unknown })?.images)
+                            ? (toolPart.output as { images: typeof toolImages }).images
+                            : []
+
+                    return (
+                        <div key={`${messageId}-tool-${index}`} className="space-y-3">
+                            {toolImages.length > 0 && (
+                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                    {toolImages.map(img => (
+                                        <a
+                                            key={img.id}
+                                            href={img.imageUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="group overflow-hidden rounded-xl border border-border bg-background"
+                                        >
+                                            <img
+                                                src={img.imageUrl}
+                                                alt={img.description || img.id}
+                                                loading="lazy"
+                                                className="aspect-video w-full bg-muted/40 object-contain transition group-hover:scale-[1.02]"
+                                            />
+                                            <div className="space-y-1 px-3 py-2 text-xs text-muted-foreground">
+                                                <div className="line-clamp-2 text-foreground/80">
+                                                    {img.description
+                                                        ? `${img.description.slice(0, 80)}${img.description.length > 80 ? '…' : ''}`
+                                                        : img.id}
+                                                </div>
+                                                <div>
+                                                    {img.sourceFile}
+                                                    {img.page ? ` · 第${img.page}页` : ''}
+                                                </div>
+                                            </div>
+                                        </a>
+                                    ))}
+                                </div>
+                            )}
+                            <Tool>
+                                <ToolHeader
+                                    type={toolPart.type}
+                                    state={toolPart.state || 'output-available'}
+                                    className="cursor-pointer"
+                                />
+                                <ToolContent>
+                                    <ToolInput input={toolPart.input || {}} />
+                                    <ToolOutput output={toolPart.output} errorText={toolPart.errorText} />
+                                </ToolContent>
+                            </Tool>
+                        </div>
+                    )
+                })}
+            </CollapsibleContent>
+        </Collapsible>
+    )
+}
 
 interface ChatPanelProps {
     threadId: string
@@ -228,69 +329,21 @@ export function ChatPanel({ threadId, model, onTitleUpdate }: ChatPanelProps) {
                                                 }
 
                                                 if (part.type?.startsWith('tool-')) {
-                                                    const toolPart = part as ToolUIPart
-                                                    const isImageTool =
-                                                        toolPart.type === 'tool-find-knowledge-images'
-                                                    const toolImages: Array<{
-                                                        id: string
-                                                        imageUrl: string
-                                                        description?: string
-                                                        sourceFile?: string
-                                                        page?: number | null
-                                                    }> =
-                                                        isImageTool &&
-                                                        Array.isArray((toolPart.output as { images?: unknown })?.images)
-                                                            ? ((toolPart.output as { images: typeof toolImages }).images)
-                                                            : []
+                                                    const toolParts = (message.parts ?? []).filter(
+                                                        p => p.type?.startsWith('tool-')
+                                                    ) as ToolUIPart[]
+
+                                                    // 同一轮的工具调用只在第一个 tool part 处汇总成一行
+                                                    if (toolParts[0] !== part) {
+                                                        return null
+                                                    }
 
                                                     return (
-                                                        <div key={`${message.id}-${i}`} className="space-y-3">
-                                                            {toolImages.length > 0 && (
-                                                                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                                                                    {toolImages.map(img => (
-                                                                        <a
-                                                                            key={img.id}
-                                                                            href={img.imageUrl}
-                                                                            target="_blank"
-                                                                            rel="noreferrer"
-                                                                            className="group overflow-hidden rounded-xl border border-border bg-background"
-                                                                        >
-                                                                            <img
-                                                                                src={img.imageUrl}
-                                                                                alt={img.description || img.id}
-                                                                                loading="lazy"
-                                                                                className="aspect-video w-full bg-muted/40 object-contain transition group-hover:scale-[1.02]"
-                                                                            />
-                                                                            <div className="space-y-1 px-3 py-2 text-xs text-muted-foreground">
-                                                                                <div className="line-clamp-2 text-foreground/80">
-                                                                                    {img.description
-                                                                                        ? `${img.description.slice(0, 80)}${img.description.length > 80 ? '…' : ''}`
-                                                                                        : img.id}
-                                                                                </div>
-                                                                                <div>
-                                                                                    {img.sourceFile}
-                                                                                    {img.page ? ` · 第${img.page}页` : ''}
-                                                                                </div>
-                                                                            </div>
-                                                                        </a>
-                                                                    ))}
-                                                                </div>
-                                                            )}
-                                                            <Tool>
-                                                                <ToolHeader
-                                                                    type={toolPart.type}
-                                                                    state={toolPart.state || 'output-available'}
-                                                                    className="cursor-pointer"
-                                                                />
-                                                                <ToolContent>
-                                                                    <ToolInput input={toolPart.input || {}} />
-                                                                    <ToolOutput
-                                                                        output={toolPart.output}
-                                                                        errorText={toolPart.errorText}
-                                                                    />
-                                                                </ToolContent>
-                                                            </Tool>
-                                                        </div>
+                                                        <ToolCallsSummary
+                                                            key={`${message.id}-tool-calls`}
+                                                            messageId={message.id}
+                                                            parts={toolParts}
+                                                        />
                                                     )
                                                 }
 
