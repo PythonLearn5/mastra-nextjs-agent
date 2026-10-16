@@ -84,8 +84,8 @@ async function describeImage(image: ExtractedImage): Promise<string | null> {
 }
 
 async function main() {
-  //const kbDir = resolve(process.cwd(), 'knowledge-base')
-  const kbDir = resolve(process.cwd(), 'knowledge-base-test')
+  const kbDir = resolve(process.cwd(), 'knowledge-base')
+  //const kbDir = resolve(process.cwd(), 'knowledge-base-test')
   const imagesDir = knowledgeImagesDir()
 
   console.log(`\n🧹 清理旧数据…`)
@@ -212,7 +212,9 @@ async function main() {
   console.log(`   共 ${allChunks.length} 个文本块（含 ${imageChunks.length} 个图片描述块）\n`)
 
   console.log('4️⃣  向量化…')
-  const batchSize = 50
+  // 阿里云 DashScope text-embedding-v4 单次请求最多 10 条输入；
+  // embedMany 会把整个 values 数组一次性发出，所以批大小不能超过 10。
+  const batchSize = 10
   const allEmbeddings: number[][] = []
   for (let i = 0; i < allChunks.length; i += batchSize) {
     const batch = allChunks.slice(i, i + batchSize)
