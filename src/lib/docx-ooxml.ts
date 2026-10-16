@@ -6,12 +6,18 @@
  * 本模块按每处 `w:drawing` / `w:pict` 的裁剪信息裁出「Word 里真正显示的样子」再压缩落盘。
  *
  * 依赖：Node 内置 zlib + sharp（图像裁剪/缩放/压缩）。
+ * EMF/WMF 矢量插图：sharp/libvips 解不了，在 Windows 上用 GDI+（System.Drawing，PowerShell）栅格化成 PNG 后接回主管线。
  */
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { tmpdir } from 'os'
 import { inflateRawSync } from 'zlib'
-import { readFileSync } from 'fs'
-import { basename } from 'path'
+import { readFileSync, writeFileSync, unlinkSync } from 'fs'
+import { basename, join } from 'path'
 import sharp from 'sharp'
 import { imageAnchor, sanitizeImageBase, type ExtractedImage } from './document-parser'
+
+const execFileAsync = promisify(execFile)
 
 // ---------------------------------------------------------------------------
 // zip 读取（docx 就是 zip：只需 store/deflate 两种方法，用内置 inflateRawSync）
@@ -270,6 +276,69 @@ function toExtractRegion(
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v))
+}
+
+// ---------------------------------------------------------------------------
+// EMF / WMF 矢量插图：GDI+ 栅格化（仅 Windows）
+// ---------------------------------------------------------------------------
+
+/** 按魔数识别 EMF/WMF（不依赖扩展名，rels 里的 target 有时不规范） */
+export function isMetafileBuffer(buf: Buffer): boolean {
+  // EMF：首记录 type=1（EMR_HEADER），偏移 40 处签名 " EMF"
+  if (buf.length >= 48 && buf.readUInt32LE(0) === 1 && buf.toString('ascii', 40, 44) === ' EMF') return true
+  // Placeable WMF：魔数 0x9AC6CDD7
+  if (buf.length >= 22 && buf.readUInt32LE(0) === 0x9ac6cdd7) return true
+  // 标准 WMF/CLIP：fileType=1|2，header 长度固定 0x0009
+  if (buf.length >= 18 && buf.readUInt16LE(0) >= 1 && buf.readUInt16LE(0) <= 2 && buf.readUInt16LE(2) === 9) return true
+  return false
+}
+
+const GDI_PLUS_SCRIPT = String.raw`
+Add-Type -AssemblyName System.Drawing
+$mf = New-Object System.Drawing.Imaging.MetaFile($args[0])
+$w = [int]$mf.Width; $h = [int]$mf.Height
+if ($w -le 0 -or $h -le 0) { throw 'metafile has invalid size' }
+$scale = [int][Math]::Min(4, [Math]::Max(1, [Math]::Ceiling(1600 / [Math]::Max($w, $h))))
+$bw = $w * $scale; $bh = $h * $scale
+$bmp = New-Object System.Drawing.Bitmap($bw, $bh)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.Clear([System.Drawing.Color]::White)
+$g.DrawImage($mf, 0, 0, $bw, $bh)
+$g.Dispose()
+$bmp.Save($args[1], [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose(); $mf.Dispose()
+`
+
+/** 用 Windows GDI+ 把 EMF/WMF 渲染成 PNG 字节；非 Windows 或失败返回 null */
+export async function rasterizeMetafile(input: Buffer): Promise<Buffer | null> {
+  if (process.platform !== 'win32') return null
+  const base = join(tmpdir(), `kb-metafile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+  const emfPath = `${base}.emf`
+  const pngPath = `${base}.png`
+  const psPath = `${base}.ps1`
+  try {
+    writeFileSync(emfPath, input)
+    // 必须用 -File 传脚本：-Command 时后续参数会被拼进命令串，$args 拿不到值
+    writeFileSync(psPath, GDI_PLUS_SCRIPT, 'ascii')
+    await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psPath, emfPath, pngPath],
+      { windowsHide: true, timeout: 30000 }
+    )
+    return readFileSync(pngPath)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`  EMF/WMF 栅格化失败: ${msg.split('\n')[0].slice(0, 160)}`)
+    return null
+  } finally {
+    for (const p of [emfPath, pngPath, psPath]) {
+      try {
+        unlinkSync(p)
+      } catch {
+        // 临时文件可能不存在，忽略
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +603,17 @@ export async function parseDocxNative(filePath: string, options: DocxNativeOptio
     if (buffer.length > maxSourceBytes) {
       console.warn(`  跳过超大嵌入图 ${p.target}（${Math.round(buffer.length / 1024)}KB > ${Math.round(maxSourceBytes / 1024 / 1024)}MB）`)
       continue
+    }
+
+    // EMF/WMF 矢量插图：sharp 解不了，先用本机 GDI+ 栅格化为 PNG 再接回主管线
+    if (isMetafileBuffer(buffer)) {
+      console.log(`  检测到矢量插图 ${p.target}，GDI+ 栅格化中…`)
+      const png = await rasterizeMetafile(buffer)
+      if (!png) {
+        console.warn(`  跳过无法解码的插图 ${p.target}（EMF/WMF 栅格化失败或非 Windows 环境）`)
+        continue
+      }
+      buffer = png
     }
 
     let region: ReturnType<typeof toExtractRegion> = null

@@ -37,11 +37,14 @@ export const findKnowledgeImagesTool = createTool({
     const images = await searchKnowledgeImages({ query, topK: topK ?? 5, fileName })
     return { query, count: images.length, images }
   },
+  // 注意：返回的 ToolResultOutput 文本变体字段名必须是 `value`（不是 `text`）。
+  // provider 转换器（openai-compatible 等）按 `output.value` 取值，
+  // 写成 `text` 会导致模型收到空的 tool 结果，误判为“没找到”。
   toModelOutput: output => {
     if (!output || output.images.length === 0) {
       return {
         type: 'text',
-        text: `知识库中未找到与“${output?.query ?? ''}”相关的图片。`,
+        value: `知识库中未找到与“${output?.query ?? ''}”相关的图片。`,
       }
     }
     const lines = output.images.map(
@@ -50,7 +53,7 @@ export const findKnowledgeImagesTool = createTool({
     )
     return {
       type: 'text',
-      text:
+      value:
         `找到 ${output.images.length} 张与“${output.query}”相关的图片，系统已将图片展示给用户。` +
         `如需在回复中提到某张图，请原样复制对应的 ⟦img:ID⟧ 标记（服务端会渲染为图片），不要自行编写图片 URL：\n${lines.join('\n')}`,
     }
