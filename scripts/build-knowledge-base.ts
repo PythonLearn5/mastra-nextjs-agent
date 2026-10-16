@@ -84,7 +84,8 @@ async function describeImage(image: ExtractedImage): Promise<string | null> {
 }
 
 async function main() {
-  const kbDir = resolve(process.cwd(), 'knowledge-base')
+  //const kbDir = resolve(process.cwd(), 'knowledge-base')
+  const kbDir = resolve(process.cwd(), 'knowledge-base-test')
   const imagesDir = knowledgeImagesDir()
 
   console.log(`\n🧹 清理旧数据…`)
@@ -159,6 +160,7 @@ async function main() {
           })
         }
         console.log(`   → 已保存: ${imageUrl}（描述 ${description.length} 字符${img.caption ? '，有图注' : ''}）`)
+        console.log(`   → 图片描述: ${description}`)
       }
     }
   } else {
